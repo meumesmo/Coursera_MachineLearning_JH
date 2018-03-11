@@ -1,0 +1,201 @@
+---
+title: "Final Project - Machine Learning - Coursera"
+author: "Pedro Lealdino Filho"
+date: "3/11/2018"
+output:
+  html_document:
+    keep_md: yes
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(warning = FALSE, message = FALSE, echo = TRUE, cache = TRUE, results = "hold", 
+               fig.width = 7, fig.height = 5)
+```
+
+## Project Introduction
+
+Using devices such as Jawbone Up, Nike FuelBand, and Fitbit it is now possible to collect a large amount of data about personal activity relatively inexpensively. These type of devices are part of the quantified self movement – a group of enthusiasts who take measurements about themselves regularly to improve their health, to find patterns in their behavior, or because they are tech geeks. One thing that people regularly do is quantify how much of a particular activity they do, but they rarely quantify how well they do it. In this project, your goal will be to use data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants. They were asked to perform barbell lifts correctly and incorrectly in 5 different ways.
+
+```{r}
+library(e1071)
+library(caret)
+library(rpart.plot)
+library(rpart)
+library(RColorBrewer)
+library(rattle)
+library(randomForest)
+library(corrplot)
+library(gbm)
+library(dplyr)
+library(lubridate)
+library(lucr)
+library(data.table)
+library(ggplot2)
+library(tidyverse)
+library(knitr)
+```
+
+### The Data
+The training data for this project are available here:
+https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv
+
+The test data are available here:
+https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv
+
+We start getting the data :
+```{r}
+trainUrl <- "http://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+testUrl <- "http://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+
+train <- read.csv(url(trainUrl), na.strings=c("NA","#DIV/0!",""))
+test <- read.csv(url(testUrl), na.strings=c("NA","#DIV/0!",""))
+
+```
+
+### The Goal
+
+The goal of your project is to predict the manner in which they did the exercise. This is the "classe" variable in the training set. You may use any of the other variables to predict with. You should create a report describing how you built your model, how you used cross validation, what you think the expected out of sample error is, and why you made the choices you did. You will also use your prediction model to predict 20 different test cases.
+
+### Exploring the Data
+
+Let's get a look on how the data looks like:
+```{r}
+str(train)
+```
+Woosh! There are a lot of NA variables here.
+```{r}
+tempTrain <- train
+tempTrain <- purrr::map_dbl(tempTrain, function(x) {round((sum(is.na(x))/ length(x)) * 100, 1)})
+tempTrain <- tempTrain[tempTrain > 0]
+
+data.frame(miss = tempTrain, var = names(tempTrain), row.names = NULL ) %>%
+  ggplot(aes(x=reorder(var, -miss), y=miss)) + 
+  geom_bar(stat='identity', fill='red') +
+  labs(x='', y='% missing', title='Percent missing data by feature') +
+  theme(axis.text.x=element_text(angle=90, hjust=1))
+
+```
+
+
+First of all let's create our partitions:
+```{r}
+inTrain <- createDataPartition(train$classe, p = 0.8, list = FALSE)
+myTrain <- train[inTrain,]
+myTest <- train[-inTrain,]
+```
+
+## Cleaning the Data
+Removing the Near Zero Variance
+```{r}
+nearZero <- nearZeroVar(myTrain, saveMetrics = TRUE)
+myTrain <- myTrain[,nearZero$nzv == FALSE]
+
+nearZero <- nearZeroVar(myTest, saveMetrics = TRUE)
+myTest <- myTest[, nearZero$nzv == FALSE]
+```
+
+Let's remove the first column of the myTrain dataset because it's not interesting to the problem
+```{r}
+myTrain <- myTrain[c(-1)]
+```
+
+Cleaning varibles with more than 60% NA's:
+```{r}
+training <- myTrain
+for(i in 1:length(myTrain)){
+  if(sum(is.na(myTrain[,i]))/nrow(myTrain) >= .6) {
+    for(j in 1:length(training)){
+      if(length(grep(names(myTrain[i]), names(training)[j])) == 1){
+        training <- training[, -j]
+      }
+    }
+  }
+}
+
+myTrain <- training
+```
+
+Transform the myTest and test data sets:
+```{r}
+clean1 <- colnames(myTrain)
+clean2 <- colnames(myTrain[, -58])
+myTest <- myTest[clean1]
+test <- test[clean2]
+```
+
+```{r}
+for (i in 1:length(test)) {
+  for (j in 1:length(myTrain)){
+    if(length(grep(names(myTrain[i]), names(test)[j])) == 1) {
+      class(test[j]) <- class(myTrain[i])
+    }
+  }
+}
+
+test <- rbind(myTrain[2, -58], test)
+test <- test[-1, ]
+```
+
+## Decision Trees
+```{r}
+modFit1 <- rpart(classe ~ ., data = myTrain, method = "class")
+fancyRpartPlot(modFit1)
+```
+
+```{r}
+predictions1 <- predict(modFit1, myTest, type = "class")
+cmtree <- caret::confusionMatrix(predictions1, myTest$classe)
+cmtree
+```
+
+```{r}
+plot(cmtree$table, col = cmtree$byClass, main = paste("Decision Tree Confusion Matrix : Accuracy = ", round(cmtree$overall['Accuracy'], 4)))
+
+```
+
+## Random Forest
+```{r}
+modFit2 <- randomForest(classe ~., data = myTrain)
+predictions2 <- predict(modFit2, myTest, type = "class")
+cmrf <- confusionMatrix(predictions2, myTest$classe)
+cmrf
+```
+```{r}
+plot(modFit2)
+
+```
+```{r}
+plot(cmrf$table, col = cmrf$byClass, main = paste("Random Forest Confusion Matrix : Accuracy = ", round(cmrf$overall['Accuracy'], 4)))
+
+```
+
+## Generalized Boosted Regression
+```{r}
+fitControl <- trainControl(method = "repeatedcv",
+                           number = 5,
+                           repeats = 1)
+
+modFit3 <- train(classe ~., data = myTrain, method = "gbm",
+                 trControl = fitControl,
+                 verbose = FALSE)
+
+modFit3$finalModel
+
+modFit3f <- modFit3$finalModel
+
+predictions3 <- predict(modFit3, newdata = myTest)
+cmgbm <- confusionMatrix(predictions3, myTest$classe)
+cmgbm
+```
+
+```{r}
+plot(modFit3, ylim = c(0.9, 1))
+```
+
+## Predict Results on the Test Data
+```{r}
+prediction <- predict(modFit2, test, type = "class")
+submit <- data.frame(portfolio_id = row.names(test), return =  prediction)
+write.csv(submit, file = "Prediction.csv", row.names = FALSE)
+```
